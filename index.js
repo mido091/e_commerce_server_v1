@@ -59,9 +59,6 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// Handle OPTIONS preflight for all routes explicitly (/:path* used for path-to-regexp v8/Vercel compatibility)
-app.options("/:path*", cors(corsOptions));
-
 // ── Core middleware ────────────────────────────────────────────────
 app.use(
   helmet({

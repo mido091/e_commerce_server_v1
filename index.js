@@ -27,6 +27,9 @@ import wishlistRoutes from "./routes/wishlist.routes.js";
 // ── App ───────────────────────────────────────────────────────────
 const app = express();
 
+// Trust proxy for Vercel/proxied environments (enables correct rate-limiting)
+app.set("trust proxy", 1);
+
 // ── CORS ──────────────────────────────────────────────────────────
 const allowedOrigins = [
   "http://localhost:5173",
@@ -56,8 +59,8 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// Handle OPTIONS preflight for all routes explicitly ((.*) used for Vercel/path-to-regexp stability)
-app.options("(.*)", cors(corsOptions));
+// Handle OPTIONS preflight for all routes explicitly (/:path* used for path-to-regexp v8/Vercel compatibility)
+app.options("/:path*", cors(corsOptions));
 
 // ── Core middleware ────────────────────────────────────────────────
 app.use(
@@ -148,8 +151,13 @@ app.use((req, res) => {
 app.use(errorHandler);
 
 // ── Start ─────────────────────────────────────────────────────────
-// Fixed to 5001 — bypasses the orphaned process still on port 5000.
-const PORT = 5001;
-app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-});
+// For Vercel, we export the app. For local development, we also listen.
+const PORT = process.env.PORT || 5001;
+
+if (process.env.NODE_ENV !== "production") {
+  app.listen(PORT, () => {
+    console.log(`✅ Local server running on http://localhost:${PORT}`);
+  });
+}
+
+export default app;

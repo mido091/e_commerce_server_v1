@@ -51,9 +51,19 @@ export const sanitizeData = (req, res, next) => {
       return data;
     };
 
-    if (req.body && Object.keys(req.body).length > 0) req.body = sanitize(req.body);
-    if (req.query && Object.keys(req.query).length > 0) req.query = sanitize(req.query);
-    if (req.params && Object.keys(req.params).length > 0) req.params = sanitize(req.params);
+    if (req.body && Object.keys(req.body).length > 0) {
+      const sanitizedBody = sanitize(req.body);
+      Object.assign(req.body, sanitizedBody);
+    }
+    if (req.query && Object.keys(req.query).length > 0) {
+      const sanitizedQuery = sanitize(req.query);
+      // Note: Reassigning query is often forbidden on Vercel, Object.assign is safer
+      Object.assign(req.query, sanitizedQuery);
+    }
+    if (req.params && Object.keys(req.params).length > 0) {
+      const sanitizedParams = sanitize(req.params);
+      Object.assign(req.params, sanitizedParams);
+    }
 
     next();
   } catch (error) {

@@ -2,10 +2,10 @@ export const errorHandler = (err, req, res, next) => {
   const isDev = process.env.NODE_ENV === "development";
 
   // Log the error stack for internal debugging (server-side only)
-  if (isDev) {
-    console.error("Critical Server Error:", err.stack);
-  } else {
-    console.error("Critical Server Error:", err.message);
+  // Vercel logs will capture these console.error outputs
+  console.error(`[ERROR] ${req.method} ${req.path} - ${err.message}`);
+  if (isDev || err.status === 500) {
+    console.error(err.stack);
   }
 
   let statusCode = err.status || 500;

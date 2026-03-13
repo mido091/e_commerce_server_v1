@@ -21,6 +21,7 @@ const db = mysql.createPool({
   connectionLimit: 10, // increased for seeding
   queueLimit: 0,
   connectTimeout: 30000, // 30 s to wait for Aiven to accept connection
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : null,
 });
 
 // Lazy connection test — runs 2s after startup so it doesn't block

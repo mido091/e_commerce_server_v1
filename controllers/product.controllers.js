@@ -1,7 +1,164 @@
 import db from "../config/db.js";
 import slugify from "slugify";
-import { normalizeArabic, expandQuery, sanitizeSearch } from "../utils/searchHelper.js";
-// create product
+import { expandQuery } from "../utils/searchHelper.js";
+
+const parseJsonArray = (value) => {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const splitImageList = (value) => {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter(Boolean);
+  return String(value)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+};
+
+async function fetchColorOptions(connection, productIds) {
+  if (!productIds.length) return new Map();
+
+  const placeholders = productIds.map(() => "?").join(", ");
+  const [rows] = await connection.query(
+    `
+      SELECT
+        pc.id,
+        pc.product_id,
+        pc.color_key,
+        pc.name,
+        pc.name_ar,
+        pc.value,
+        pc.sort_order,
+        pci.image_url,
+        pci.is_main,
+        pci.sort_order AS image_sort_order
+      FROM product_colors pc
+      LEFT JOIN product_color_images pci ON pc.id = pci.color_id
+      WHERE pc.product_id IN (${placeholders})
+      ORDER BY pc.product_id ASC, pc.sort_order ASC, pci.sort_order ASC, pci.id ASC
+    `,
+    productIds,
+  );
+
+  const productMap = new Map();
+  const colorMap = new Map();
+
+  for (const row of rows) {
+    if (!colorMap.has(row.id)) {
+      colorMap.set(row.id, {
+        id: row.id,
+        product_id: row.product_id,
+        key: row.color_key || null,
+        name: row.name,
+        name_ar: row.name_ar || null,
+        value: row.value,
+        images: [],
+        main_image: null,
+      });
+    }
+
+    const color = colorMap.get(row.id);
+    if (row.image_url) {
+      color.images.push(row.image_url);
+      if (!color.main_image || row.is_main) {
+        color.main_image = row.image_url;
+      }
+    }
+
+    if (!productMap.has(row.product_id)) {
+      productMap.set(row.product_id, []);
+    }
+  }
+
+  for (const color of colorMap.values()) {
+    productMap.get(color.product_id)?.push(color);
+  }
+
+  return productMap;
+}
+
+async function fetchVariants(connection, productIds) {
+  if (!productIds.length) return new Map();
+
+  const placeholders = productIds.map(() => "?").join(", ");
+  const [rows] = await connection.query(
+    `
+      SELECT
+        pv.id,
+        pv.product_id,
+        pv.color_id,
+        pv.size_value,
+        pv.stock,
+        pc.name AS color_name,
+        pc.name_ar AS color_name_ar,
+        pc.value AS color_value
+      FROM product_variants pv
+      LEFT JOIN product_colors pc ON pv.color_id = pc.id
+      WHERE pv.product_id IN (${placeholders})
+      ORDER BY pv.product_id ASC, pv.id ASC
+    `,
+    productIds,
+  );
+
+  const productMap = new Map();
+  for (const row of rows) {
+    if (!productMap.has(row.product_id)) {
+      productMap.set(row.product_id, []);
+    }
+    productMap.get(row.product_id).push({
+      id: row.id,
+      color_id: row.color_id,
+      color_name: row.color_name || null,
+      color_name_ar: row.color_name_ar || null,
+      color_value: row.color_value || null,
+      size_value: row.size_value || null,
+      stock: Number(row.stock || 0),
+    });
+  }
+
+  return productMap;
+}
+
+async function enrichProducts(rows, connection = db) {
+  if (!rows.length) return [];
+
+  const productIds = rows.map((row) => row.id);
+  const [colorOptionsMap, variantsMap] = await Promise.all([
+    fetchColorOptions(connection, productIds),
+    fetchVariants(connection, productIds),
+  ]);
+
+  return rows.map((row) => {
+    const galleryImages = splitImageList(row.images);
+    const colorOptions = colorOptionsMap.get(row.id) || [];
+    const variants = variantsMap.get(row.id) || [];
+    const fallbackColorImages = colorOptions.flatMap((color) => color.images || []);
+    const images = galleryImages.length ? galleryImages : fallbackColorImages;
+    const main_image = images[0] || colorOptions[0]?.main_image || null;
+
+    return {
+      ...row,
+      images,
+      main_image,
+      size_mode: row.size_mode || "none",
+      size_options: parseJsonArray(row.size_options),
+      color_options: colorOptions,
+      variants,
+      has_variants:
+        variants.length > 0 ||
+        colorOptions.length > 0 ||
+        parseJsonArray(row.size_options).length > 0,
+    };
+  });
+}
+
 const createProduct = async (req, res, next) => {
   try {
     let {
@@ -17,40 +174,35 @@ const createProduct = async (req, res, next) => {
       stock,
       is_active,
     } = req.body || {};
-    //check if name and slug are required
+
     if (!name || !category_id || !price || !description || !stock) {
       return res.status(400).json({ message: "All fields are required" });
     }
+
     is_active = is_active !== undefined ? is_active : true;
     price = parseFloat(price);
     old_price = old_price ? parseFloat(old_price) : null;
-    stock = parseInt(stock);
+    stock = parseInt(stock, 10);
 
-    if (isNaN(price) || isNaN(stock)) {
-      return res
-        .status(400)
-        .json({ message: "Price and stock must be numbers" });
+    if (Number.isNaN(price) || Number.isNaN(stock)) {
+      return res.status(400).json({ message: "Price and stock must be numbers" });
     }
 
     if (old_price !== null && old_price <= price) {
-      return res
-        .status(400)
-        .json({ message: "Original price must be higher than current price" });
+      return res.status(400).json({ message: "Original price must be higher than current price" });
     }
+
     const slug = slugify(name, { lower: true, strict: true });
-    //check if product already exists
-    const [rows] = await db.query("SELECT * FROM products WHERE name = ?", [
-      name,
-    ]);
+    const [rows] = await db.query("SELECT * FROM products WHERE name = ?", [name]);
     if (rows.length > 0) {
       return res.status(400).json({ message: "Product already exists" });
     }
-    //insert product
+
     const [result] = await db.query(
       "INSERT INTO products (name, name_ar, category_id, price, old_price, slug, description, description_ar, specs_en, specs_ar, stock, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         name,
-        name_ar,
+        name_ar || null,
         category_id,
         price,
         old_price,
@@ -63,58 +215,66 @@ const createProduct = async (req, res, next) => {
         is_active,
       ],
     );
+
     if (result.affectedRows === 0) {
       return res.status(400).json({ message: "Product not created" });
     }
-    const product_id = result.insertId;
-    //image upload
-    if (!req.files || req.files.length === 0) {
+
+    const productId = result.insertId;
+    const imageFiles = (req.files || []).filter((file) => file.fieldname === "images");
+    if (!imageFiles.length) {
       return res.status(400).json({ message: "Image is required" });
     }
-    const image_url = req.files.map((file, index) => {
-      return db.query(
-        "INSERT INTO product_images (product_id, image_url, is_main) VALUES (?, ?, ?)",
-        [product_id, file.path, index === 0 ? 1 : 0],
-      );
-    });
-    await Promise.all(image_url);
-    //if success
+
+    await Promise.all(
+      imageFiles.map((file, index) =>
+        db.query("INSERT INTO product_images (product_id, image_url, is_main) VALUES (?, ?, ?)", [
+          productId,
+          file.path,
+          index === 0 ? 1 : 0,
+        ]),
+      ),
+    );
+
     res.status(201).json({ message: "Product created successfully" });
   } catch (error) {
     next(error);
   }
 };
 
-//get all products
 const getAllProducts = async (req, res, next) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 20;
     const offset = (page - 1) * limit;
     const name = req.query.name || "";
     const category_id = req.query.category_id || "";
     const min_price = req.query.min_price || "";
     const max_price = req.query.max_price || "";
 
-    let whereConditions = [];
-    let queryParams = [];
+    const whereConditions = [];
+    const queryParams = [];
 
     if (name) {
-      const words = name.trim().split(/\s+/).filter(w => w.length > 1);
-      
+      const words = name.trim().split(/\s+/).filter((word) => word.length > 1);
       const wordGroups = [];
-      words.forEach(word => {
+
+      words.forEach((word) => {
         const expandedTerms = expandQuery(word);
-        const termsSubQuery = [];
-        expandedTerms.forEach(term => {
-          termsSubQuery.push("(products.name LIKE ? OR products.name_ar LIKE ? OR products.description LIKE ? OR products.description_ar LIKE ?)");
+        const termQueries = [];
+        expandedTerms.forEach((term) => {
+          termQueries.push(
+            "(products.name LIKE ? OR products.name_ar LIKE ? OR products.description LIKE ? OR products.description_ar LIKE ?)",
+          );
           const likeTerm = `%${term}%`;
           queryParams.push(likeTerm, likeTerm, likeTerm, likeTerm);
         });
-        wordGroups.push(`(${termsSubQuery.join(" OR ")})`);
+        if (termQueries.length) {
+          wordGroups.push(`(${termQueries.join(" OR ")})`);
+        }
       });
 
-      if (wordGroups.length > 0) {
+      if (wordGroups.length) {
         whereConditions.push(`(${wordGroups.join(" AND ")})`);
       }
     }
@@ -134,7 +294,7 @@ const getAllProducts = async (req, res, next) => {
       queryParams.push(parseFloat(max_price));
     }
 
-    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
+    const whereClause = whereConditions.length ? `WHERE ${whereConditions.join(" AND ")}` : "";
 
     const [[{ total }]] = await db.query(
       `SELECT COUNT(*) as total FROM products ${whereClause}`,
@@ -143,30 +303,23 @@ const getAllProducts = async (req, res, next) => {
 
     const [rows] = await db.query(
       `
-      SELECT 
-        products.*, 
-        categories.name as category_name,
-        categories.name_ar as category_name_ar,
-        GROUP_CONCAT(product_images.image_url ORDER BY product_images.is_main DESC, product_images.id ASC) AS images
-      FROM products
-      LEFT JOIN product_images ON products.id = product_images.product_id
-      LEFT JOIN categories ON products.category_id = categories.id
-      ${whereClause}
-      GROUP BY products.id
-      ORDER BY products.id DESC
-      LIMIT ? OFFSET ?
-    `,
+        SELECT
+          products.*,
+          categories.name AS category_name,
+          categories.name_ar AS category_name_ar,
+          GROUP_CONCAT(product_images.image_url ORDER BY product_images.is_main DESC, product_images.id ASC) AS images
+        FROM products
+        LEFT JOIN product_images ON products.id = product_images.product_id
+        LEFT JOIN categories ON products.category_id = categories.id
+        ${whereClause}
+        GROUP BY products.id
+        ORDER BY products.id DESC
+        LIMIT ? OFFSET ?
+      `,
       [...queryParams, limit, offset],
     );
 
-    const products = rows.map((product) => {
-      const imageArray = product.images ? product.images.split(",") : [];
-      return {
-        ...product,
-        images: imageArray,
-        main_image: imageArray.length > 0 ? imageArray[0] : null,
-      };
-    });
+    const products = await enrichProducts(rows);
 
     res.status(200).json({
       success: true,
@@ -183,7 +336,7 @@ const getAllProducts = async (req, res, next) => {
     next(error);
   }
 };
-//get product by id
+
 const getProductById = async (req, res, next) => {
   try {
     const id = req.params.id;
@@ -191,48 +344,58 @@ const getProductById = async (req, res, next) => {
       return res.status(400).json({ message: "Product not found" });
     }
 
-    // Main product query with category name
     const [rows] = await db.query(
-      `SELECT products.*, 
-              categories.name as category_name,
-              categories.name_ar as category_name_ar,
-              GROUP_CONCAT(product_images.image_url ORDER BY product_images.is_main DESC, product_images.id ASC) AS images
-       FROM products
-       LEFT JOIN product_images ON products.id = product_images.product_id
-       LEFT JOIN categories ON products.category_id = categories.id
-       WHERE products.id = ?
-       GROUP BY products.id`,
+      `
+        SELECT
+          products.*,
+          categories.name AS category_name,
+          categories.name_ar AS category_name_ar,
+          GROUP_CONCAT(product_images.image_url ORDER BY product_images.is_main DESC, product_images.id ASC) AS images
+        FROM products
+        LEFT JOIN product_images ON products.id = product_images.product_id
+        LEFT JOIN categories ON products.category_id = categories.id
+        WHERE products.id = ?
+        GROUP BY products.id
+      `,
       [id],
     );
-    if (rows.length === 0) {
+
+    if (!rows.length) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    const product = {
-      ...rows[0],
-      images: rows[0].images ? rows[0].images.split(",") : [],
-    };
+    const [product] = await enrichProducts(rows);
 
-    // Avg rating & review count (approved only)
     const [[ratingData]] = await db.query(
-      `SELECT COALESCE(AVG(rating), 0) as avg_rating, COUNT(*) as review_count
-       FROM reviews WHERE product_id = ? AND is_approved = TRUE`,
+      `
+        SELECT COALESCE(AVG(rating), 0) AS avg_rating, COUNT(*) AS review_count
+        FROM reviews
+        WHERE product_id = ? AND is_approved = TRUE
+      `,
       [id],
     );
     product.avg_rating = +Number(ratingData.avg_rating).toFixed(1);
     product.review_count = ratingData.review_count;
 
-    // Related products (same category, exclude self, limit 5)
-    const [related] = await db.query(
-      `SELECT p.id, p.name, p.name_ar, p.price, p.stock,
-              (SELECT pi.image_url FROM product_images pi WHERE pi.product_id = p.id LIMIT 1) as main_image
-       FROM products p
-       WHERE p.category_id = ? AND p.id != ? AND p.is_active = 1
-       ORDER BY RAND()
-       LIMIT 5`,
+    const [relatedRows] = await db.query(
+      `
+        SELECT
+          p.*,
+          c.name AS category_name,
+          c.name_ar AS category_name_ar,
+          GROUP_CONCAT(pi.image_url ORDER BY pi.is_main DESC, pi.id ASC) AS images
+        FROM products p
+        LEFT JOIN product_images pi ON p.id = pi.product_id
+        LEFT JOIN categories c ON p.category_id = c.id
+        WHERE p.category_id = ? AND p.id != ? AND p.is_active = 1
+        GROUP BY p.id
+        ORDER BY p.id DESC
+        LIMIT 5
+      `,
       [product.category_id, id],
     );
-    product.related_products = related;
+
+    product.related_products = await enrichProducts(relatedRows);
 
     res.status(200).json({
       success: true,
@@ -243,9 +406,9 @@ const getProductById = async (req, res, next) => {
     next(error);
   }
 };
-//update product
+
 const updateProduct = async (req, res, next) => {
-  const connection = await db.getConnection(); // Use a dedicated connection for the transaction
+  const connection = await db.getConnection();
   try {
     const { id } = req.params;
     let {
@@ -262,37 +425,26 @@ const updateProduct = async (req, res, next) => {
       is_active,
     } = req.body || {};
 
-    // 1. Check if product exists before updating
-    const [rows] = await connection.query(
-      "SELECT * FROM products WHERE id = ?",
-      [id],
-    );
-    if (rows.length === 0) {
-      await connection.release();
+    const [rows] = await connection.query("SELECT * FROM products WHERE id = ?", [id]);
+    if (!rows.length) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    // 2. Start Transaction
     await connection.beginTransaction();
 
-    // 3. Prepare data and handle Falsy values
     name = name || rows[0].name;
     name_ar = name_ar || rows[0].name_ar;
     price = price !== undefined ? parseFloat(price) : rows[0].price;
     old_price = old_price !== undefined ? (old_price ? parseFloat(old_price) : null) : rows[0].old_price;
-    stock = stock !== undefined ? parseInt(stock) : rows[0].stock;
+    stock = stock !== undefined ? parseInt(stock, 10) : rows[0].stock;
 
     if (old_price !== null && old_price <= price) {
-      return res
-        .status(400)
-        .json({ message: "Original price must be higher than current price" });
+      return res.status(400).json({ message: "Original price must be higher than current price" });
     }
 
     is_active = is_active !== undefined ? is_active : rows[0].is_active;
     category_id = category_id || rows[0].category_id;
-    const slug = name
-      ? slugify(name, { lower: true, strict: true })
-      : rows[0].slug;
+    const slug = name ? slugify(name, { lower: true, strict: true }) : rows[0].slug;
 
     await connection.query(
       "UPDATE products SET name = ?, name_ar = ?, slug = ?, category_id = ?, price = ?, old_price = ?, description = ?, description_ar = ?, specs_en = ?, specs_ar = ?, stock = ?, is_active = ? WHERE id = ?",
@@ -313,88 +465,55 @@ const updateProduct = async (req, res, next) => {
       ],
     );
 
-    // 5. Handle Image Updates (If new images are uploaded)
-    if (req.files && req.files.length > 0) {
-      // Step A: Fetch and delete old images from database
-      // Note: For a full production app, you would also delete the files from Cloudinary here
-      await connection.query(
-        "DELETE FROM product_images WHERE product_id = ?",
-        [id],
+    const imageFiles = (req.files || []).filter((file) => file.fieldname === "images");
+    if (imageFiles.length) {
+      await connection.query("DELETE FROM product_images WHERE product_id = ?", [id]);
+      await Promise.all(
+        imageFiles.map((file, index) =>
+          connection.query(
+            "INSERT INTO product_images (product_id, image_url, is_main) VALUES (?, ?, ?)",
+            [id, file.path, index === 0 ? 1 : 0],
+          ),
+        ),
       );
-
-      // Step B: Insert new image URLs
-      const imageQueries = req.files.map((file, index) => {
-        return connection.query(
-          "INSERT INTO product_images (product_id, image_url, is_main) VALUES (?, ?, ?)",
-          [id, file.path, index === 0 ? 1 : 0],
-        );
-      });
-      await Promise.all(imageQueries);
     }
 
-    // 6. Commit Transaction
     await connection.commit();
-    res
-      .status(200)
-      .json({ status: true, message: "Product updated successfully" });
+    res.status(200).json({ status: true, message: "Product updated successfully" });
   } catch (error) {
-    // Rollback changes if any step fails
     await connection.rollback();
     next(error);
   } finally {
-    // Release the connection back to the pool
     connection.release();
   }
 };
-//delete product
+
 const deleteProduct = async (req, res, next) => {
-  const connection = await db.getConnection(); // مخصص للـ Transaction
+  const connection = await db.getConnection();
   try {
     const id = req.params.id;
-
-    // 1. التأكد من وجود المنتج
-    const [rows] = await connection.query(
-      "SELECT * FROM products WHERE id = ?",
-      [id],
-    );
-    if (rows.length === 0) {
-      await connection.release();
+    const [rows] = await connection.query("SELECT * FROM products WHERE id = ?", [id]);
+    if (!rows.length) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    // 2. بدء العملية
     await connection.beginTransaction();
-
-    // 3. مسح الصور من جدول product_images أولاً (الارتباط)
-    await connection.query("DELETE FROM product_images WHERE product_id = ?", [
-      id,
-    ]);
-
-    // 4. مسح المنتج نفسه من جدول products
-    const [result] = await connection.query(
-      "DELETE FROM products WHERE id = ?",
-      [id],
-    );
-
-    if (result.affectedRows === 0) {
-      throw new Error("Failed to delete product from database");
-    }
-
-    // 5. تثبيت العملية
+    await connection.query("DELETE FROM product_images WHERE product_id = ?", [id]);
+    await connection.query("DELETE FROM products WHERE id = ?", [id]);
     await connection.commit();
+
     res.status(200).json({
       status: true,
       message: "Product and its images deleted successfully",
     });
   } catch (error) {
-    // لو حصلت مشكلة في أي خطوة، الغِ المسح
     await connection.rollback();
     next(error);
   } finally {
     connection.release();
   }
 };
-//export
+
 export {
   createProduct,
   getAllProducts,

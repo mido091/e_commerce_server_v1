@@ -29,6 +29,7 @@
   "scripts": {
     "dev": "nodemon --experimental-specifier-resolution=node index.js",
     "start": "node index.js",
+    "seed:fashion": "node scripts/seed-fashion-catalog.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

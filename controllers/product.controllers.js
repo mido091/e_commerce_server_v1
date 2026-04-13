@@ -312,7 +312,7 @@ const getAllProducts = async (req, res, next) => {
         LEFT JOIN product_images ON products.id = product_images.product_id
         LEFT JOIN categories ON products.category_id = categories.id
         ${whereClause}
-        GROUP BY products.id
+        GROUP BY products.id, categories.name, categories.name_ar
         ORDER BY products.id DESC
         LIMIT ? OFFSET ?
       `,
@@ -355,7 +355,7 @@ const getProductById = async (req, res, next) => {
         LEFT JOIN product_images ON products.id = product_images.product_id
         LEFT JOIN categories ON products.category_id = categories.id
         WHERE products.id = ?
-        GROUP BY products.id
+        GROUP BY products.id, categories.name, categories.name_ar
       `,
       [id],
     );
@@ -388,7 +388,7 @@ const getProductById = async (req, res, next) => {
         LEFT JOIN product_images pi ON p.id = pi.product_id
         LEFT JOIN categories c ON p.category_id = c.id
         WHERE p.category_id = ? AND p.id != ? AND p.is_active = 1
-        GROUP BY p.id
+        GROUP BY p.id, c.name, c.name_ar
         ORDER BY p.id DESC
         LIMIT 5
       `,

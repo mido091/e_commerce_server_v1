@@ -1,6 +1,7 @@
 import mysql from "mysql2";
 import dotenv from "dotenv";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -8,9 +9,22 @@ const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
 // ── Connection pool ────────────────────────────────────────────────
-// connectionLimit kept low (3) so we don't exhaust Aiven's free-tier
-// connection quota while an old server process may still be running.
-// Connections are created lazily on first query — no blocking startup test.
+const sslConfig = {
+  rejectUnauthorized: true, // Always verify for TiDB Cloud
+};
+
+// If a CA cert path is provided in .env, try to load it
+if (process.env.DB_ATTR_SSL_CA) {
+  try {
+    const caPath = path.resolve(__dirname, "..", process.env.DB_ATTR_SSL_CA);
+    if (fs.existsSync(caPath)) {
+      sslConfig.ca = fs.readFileSync(caPath);
+    }
+  } catch (err) {
+    console.warn("⚠️ Failed to load SSL CA from:", process.env.DB_ATTR_SSL_CA, err.message);
+  }
+}
+
 const db = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -18,10 +32,10 @@ const db = mysql.createPool({
   port: process.env.DB_PORT,
   database: process.env.DB_NAME,
   waitForConnections: true,
-  connectionLimit: 10, // increased for seeding
+  connectionLimit: 10,
   queueLimit: 0,
-  connectTimeout: 30000, // 30 s to wait for Aiven to accept connection
-  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : null,
+  connectTimeout: 30000,
+  ssl: sslConfig, // Always enable SSL for TiDB Cloud
 });
 
 // Lazy connection test — runs 2s after startup so it doesn't block

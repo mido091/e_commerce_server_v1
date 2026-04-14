@@ -1,5 +1,6 @@
 import db from "../config/db.js";
 import slugify from "slugify";
+import { sendError, sendSuccess } from "../utils/apiError.js";
 
 const createCategory = async (req, res, next) => {
   try {
@@ -11,7 +12,7 @@ const createCategory = async (req, res, next) => {
     slug = slugify(name, { lower: true, strict: true });
     //check if name and slug are required
     if (!name || !slug || !name_ar) {
-      return res.status(400).json({ message: "Name and slug are required" });
+      return sendError(res, 400, "VALIDATION_REQUIRED", "Name and slug are required");
     }
     //image upload
     const image_url = req.file ? req.file.path : "";
@@ -19,7 +20,7 @@ const createCategory = async (req, res, next) => {
       slug,
     ]);
     if (rows.length > 0) {
-      return res.status(400).json({ message: "Category already exists" });
+      return sendError(res, 400, "CATEGORY_EXISTS", "Category already exists");
     }
     //insert category
     const [result] = await db.query(
@@ -27,10 +28,9 @@ const createCategory = async (req, res, next) => {
       [name, slug, parent_id, is_active, sort_order, image_url, name_ar],
     );
     if (result.affectedRows === 0) {
-      return res.status(400).json({ message: "Category not created" });
+      return sendError(res, 400, "CATEGORY_CREATE_FAILED", "Category not created");
     }
-    //if success
-    res.status(201).json({ message: "Category created successfully" });
+    sendSuccess(res, 201, { message: "Category created successfully" });
   } catch (error) {
     next(error);
   }
@@ -90,7 +90,7 @@ const getAllCategories = async (req, res, next) => {
   try {
     const [rows] = await db.query("SELECT * FROM categories");
     if (rows.length === 0) {
-      return res.status(400).json({ message: "Categories not found" });
+      return sendError(res, 404, "CATEGORY_NOT_FOUND", "Categories not found");
     }
     //if success
     res
@@ -109,13 +109,13 @@ const getCategoryById = async (req, res, next) => {
   try {
     const id = req.params.id;
     if (!id) {
-      return res.status(400).json({ message: "Category not found" });
+      return sendError(res, 404, "CATEGORY_NOT_FOUND", "Category not found");
     }
     const [rows] = await db.query("SELECT * FROM categories WHERE id = ?", [
       id,
     ]);
     if (rows.length === 0) {
-      return res.status(400).json({ message: "Category not found" });
+      return sendError(res, 404, "CATEGORY_NOT_FOUND", "Category not found");
     }
     //if success
     res
@@ -196,13 +196,13 @@ const updateCategory = async (req, res, next) => {
   try {
     const id = req.params.id;
     if (!id) {
-      return res.status(400).json({ message: "Category not found" });
+      return sendError(res, 404, "CATEGORY_NOT_FOUND", "Category not found");
     }
     const [rows] = await db.query("SELECT * FROM categories WHERE id = ?", [
       id,
     ]);
     if (rows.length === 0) {
-      return res.status(400).json({ message: "Category not found" });
+      return sendError(res, 404, "CATEGORY_NOT_FOUND", "Category not found");
     }
 
     let { name, slug, parent_id, is_active, sort_order, name_ar } =
@@ -220,10 +220,9 @@ const updateCategory = async (req, res, next) => {
       [name, slug, parent_id, is_active, sort_order, image_url, name_ar, id],
     );
     if (result.affectedRows === 0) {
-      return res.status(400).json({ message: "Category not updated" });
+      return sendError(res, 400, "CATEGORY_UPDATE_FAILED", "Category not updated");
     }
-    //if success
-    res.status(200).json({ message: "Category updated successfully" });
+    sendSuccess(res, 200, { message: "Category updated successfully" });
   } catch (error) {
     next(error);
   }
@@ -244,7 +243,7 @@ const deleteCategory = async (req, res, next) => {
     );
     if (categoryRows.length === 0) {
       await connection.release();
-      return res.status(404).json({ message: "Category not found" });
+      return sendError(res, 404, "CATEGORY_NOT_FOUND", "Category not found");
     }
 
     // 3. Start Database Transaction
@@ -274,7 +273,7 @@ const deleteCategory = async (req, res, next) => {
     // 7. Commit the transaction
     await connection.commit();
 
-    res.status(200).json({
+    sendSuccess(res, 200, {
       status: true,
       message: "Category and all its linked products/images deleted successfully",
     });

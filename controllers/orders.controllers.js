@@ -1,4 +1,5 @@
 import db from "../config/db.js";
+import { sendError, sendSuccess } from "../utils/apiError.js";
 
 // ── GET /api/orders (Admin/Owner) ──────────────────────────────────
 export const getAllOrders = async (req, res, next) => {
@@ -165,9 +166,7 @@ export const getOrderById = async (req, res, next) => {
     const [[order]] = await db.query(query, params);
 
     if (!order) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Order not found" });
+      return sendError(res, 404, "ORDER_NOT_FOUND", "Order not found");
     }
 
     const [items] = await db.query(
@@ -215,25 +214,26 @@ export const createOrder = async (req, res, next) => {
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       await connection.release();
-      return res.status(400).json({ success: false, message: "Cart is empty" });
+      return sendError(res, 400, "CART_EMPTY", "Cart is empty");
     }
 
     // ── Egyptian Phone Validation ──
     if (!shipping_phone || !/^01[0125][0-9]{8}$/.test(shipping_phone)) {
       await connection.release();
-      return res.status(400).json({
-        success: false,
-        message:
-          "A valid Egyptian phone number is required (e.g., 01012345678).",
-      });
+      return sendError(
+        res,
+        400,
+        "VALIDATION_INVALID_PHONE_EG",
+        "A valid Egyptian phone number is required (e.g., 01012345678).",
+        { field: "shipping_phone" },
+      );
     }
 
     // Address Validation
     if (!shipping_address || shipping_address.trim().length < 5) {
       await connection.release();
-      return res.status(400).json({
-        success: false,
-        message: "A valid shipping address is required.",
+      return sendError(res, 400, "ORDER_INVALID_ADDRESS", "A valid shipping address is required.", {
+        field: "shipping_address",
       });
     }
 
@@ -249,11 +249,13 @@ export const createOrder = async (req, res, next) => {
       !req.file
     ) {
       await connection.release();
-      return res.status(400).json({
-        success: false,
-        message:
-          "Receipt screenshot is required for Electronic Wallet and InstaPay payments.",
-      });
+      return sendError(
+        res,
+        400,
+        "ORDER_RECEIPT_REQUIRED",
+        "Receipt screenshot is required for Electronic Wallet and InstaPay payments.",
+        { field: "screenshot" },
+      );
     }
 
     // 1. Begin transaction
@@ -298,12 +300,12 @@ export const createOrder = async (req, res, next) => {
            // If coupon is invalid, we return 400
            await connection.rollback();
            connection.release();
-           return res.status(400).json({ success: false, message: "Applied coupon is no longer valid" });
+           return sendError(res, 400, "COUPON_INVALID", "Applied coupon is no longer valid");
         }
       } else {
         await connection.rollback();
         connection.release();
-        return res.status(400).json({ success: false, message: "Invalid coupon code" });
+        return sendError(res, 400, "COUPON_INVALID", "Invalid coupon code");
       }
     }
 
@@ -344,8 +346,7 @@ export const createOrder = async (req, res, next) => {
     // 4. Commit transaction
     await connection.commit();
 
-    res.status(201).json({
-      success: true,
+    sendSuccess(res, 201, {
       message: "Order placed successfully",
       data: { order_id: orderId },
     });
@@ -376,9 +377,7 @@ export const updateOrderStatus = async (req, res, next) => {
     ];
     if (!validStatuses.includes(status)) {
       await connection.release();
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid status" });
+      return sendError(res, 400, "ORDER_STATUS_INVALID", "Invalid status", { field: "status" });
     }
 
     await connection.beginTransaction();
@@ -392,9 +391,7 @@ export const updateOrderStatus = async (req, res, next) => {
     if (!currentOrder) {
       await connection.rollback();
       await connection.release();
-      return res
-        .status(404)
-        .json({ success: false, message: "Order not found" });
+      return sendError(res, 404, "ORDER_NOT_FOUND", "Order not found");
     }
 
     // ── Stock Deduction Logic ──
@@ -449,8 +446,7 @@ export const updateOrderStatus = async (req, res, next) => {
 
     await connection.commit();
 
-    res.status(200).json({
-      success: true,
+    sendSuccess(res, 200, {
       message:
         status === "rejected"
           ? "Order has been successfully rejected"

@@ -1,4 +1,5 @@
 import db from "../config/db.js";
+import { sendError, sendSuccess } from "../utils/apiError.js";
 
 // GET /api/messages (Admin only)
 export const getMessages = async (req, res, next) => {
@@ -37,9 +38,7 @@ export const createMessage = async (req, res, next) => {
     const { name, email, subject, message } = req.body;
 
     if (!name || !email || !subject || !message) {
-      return res
-        .status(400)
-        .json({ success: false, message: "All fields are required" });
+      return sendError(res, 400, "VALIDATION_REQUIRED", "All fields are required");
     }
 
     await db.query(
@@ -47,9 +46,7 @@ export const createMessage = async (req, res, next) => {
       [name, email, subject, message],
     );
 
-    res
-      .status(201)
-      .json({ success: true, message: "Message sent successfully" });
+    sendSuccess(res, 201, { message: "Message sent successfully" });
   } catch (error) {
     next(error);
   }
@@ -62,9 +59,7 @@ export const updateMessageStatus = async (req, res, next) => {
     const { status } = req.body;
 
     if (!["read", "unread", "archived"].includes(status)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid status" });
+      return sendError(res, 400, "MESSAGE_STATUS_INVALID", "Invalid status", { field: "status" });
     }
 
     await db.query("UPDATE contact_messages SET status = ? WHERE id = ?", [
@@ -72,7 +67,7 @@ export const updateMessageStatus = async (req, res, next) => {
       id,
     ]);
 
-    res.status(200).json({ success: true, message: "Message status updated" });
+    sendSuccess(res, 200, { message: "Message status updated" });
   } catch (error) {
     next(error);
   }
@@ -83,7 +78,7 @@ export const deleteMessage = async (req, res, next) => {
   try {
     const { id } = req.params;
     await db.query("DELETE FROM contact_messages WHERE id = ?", [id]);
-    res.status(200).json({ success: true, message: "Message deleted" });
+    sendSuccess(res, 200, { message: "Message deleted" });
   } catch (error) {
     next(error);
   }

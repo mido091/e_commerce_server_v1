@@ -23,6 +23,7 @@ import reviewsRoutes from "./routes/reviews.routes.js";
 import messagesRoutes from "./routes/messages.routes.js";
 import couponRoutes from "./routes/coupon.routes.js";
 import wishlistRoutes from "./routes/wishlist.routes.js";
+import dashboardRoutes from "./routes/dashboard.routes.js";
 
 // ── App ───────────────────────────────────────────────────────────
 const app = express();
@@ -123,6 +124,10 @@ router.use("/products", productRoutes);
 // Orders
 // Canonical prefix: /api/orders
 router.use("/orders", ordersRoutes);
+
+// Dashboard
+// Canonical prefix: /api/dashboard
+router.use("/dashboard", dashboardRoutes);
 
 // Payments
 // Canonical prefix: /api/payments

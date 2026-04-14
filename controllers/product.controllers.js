@@ -1,6 +1,7 @@
 import db from "../config/db.js";
 import slugify from "slugify";
 import { expandQuery } from "../utils/searchHelper.js";
+import { sendError, sendSuccess } from "../utils/apiError.js";
 
 const parseJsonArray = (value) => {
   if (!value) return [];
@@ -176,7 +177,7 @@ const createProduct = async (req, res, next) => {
     } = req.body || {};
 
     if (!name || !category_id || !price || !description || !stock) {
-      return res.status(400).json({ message: "All fields are required" });
+      return sendError(res, 400, "VALIDATION_REQUIRED", "All fields are required");
     }
 
     is_active = is_active !== undefined ? is_active : true;
@@ -185,17 +186,17 @@ const createProduct = async (req, res, next) => {
     stock = parseInt(stock, 10);
 
     if (Number.isNaN(price) || Number.isNaN(stock)) {
-      return res.status(400).json({ message: "Price and stock must be numbers" });
+      return sendError(res, 400, "PRODUCT_INVALID_NUMBERS", "Price and stock must be numbers");
     }
 
     if (old_price !== null && old_price <= price) {
-      return res.status(400).json({ message: "Original price must be higher than current price" });
+      return sendError(res, 400, "PRODUCT_OLD_PRICE_INVALID", "Original price must be higher than current price");
     }
 
     const slug = slugify(name, { lower: true, strict: true });
     const [rows] = await db.query("SELECT * FROM products WHERE name = ?", [name]);
     if (rows.length > 0) {
-      return res.status(400).json({ message: "Product already exists" });
+      return sendError(res, 400, "PRODUCT_EXISTS", "Product already exists");
     }
 
     const [result] = await db.query(
@@ -217,13 +218,13 @@ const createProduct = async (req, res, next) => {
     );
 
     if (result.affectedRows === 0) {
-      return res.status(400).json({ message: "Product not created" });
+      return sendError(res, 400, "PRODUCT_CREATE_FAILED", "Product not created");
     }
 
     const productId = result.insertId;
     const imageFiles = (req.files || []).filter((file) => file.fieldname === "images");
     if (!imageFiles.length) {
-      return res.status(400).json({ message: "Image is required" });
+      return sendError(res, 400, "UPLOAD_IMAGE_REQUIRED", "Image is required", { field: "images" });
     }
 
     await Promise.all(
@@ -236,7 +237,7 @@ const createProduct = async (req, res, next) => {
       ),
     );
 
-    res.status(201).json({ message: "Product created successfully" });
+    sendSuccess(res, 201, { message: "Product created successfully" });
   } catch (error) {
     next(error);
   }
@@ -341,7 +342,7 @@ const getProductById = async (req, res, next) => {
   try {
     const id = req.params.id;
     if (!id) {
-      return res.status(400).json({ message: "Product not found" });
+      return sendError(res, 400, "PRODUCT_NOT_FOUND", "Product not found");
     }
 
     const [rows] = await db.query(
@@ -361,7 +362,7 @@ const getProductById = async (req, res, next) => {
     );
 
     if (!rows.length) {
-      return res.status(404).json({ message: "Product not found" });
+      return sendError(res, 404, "PRODUCT_NOT_FOUND", "Product not found");
     }
 
     const [product] = await enrichProducts(rows);
@@ -397,8 +398,7 @@ const getProductById = async (req, res, next) => {
 
     product.related_products = await enrichProducts(relatedRows);
 
-    res.status(200).json({
-      success: true,
+    sendSuccess(res, 200, {
       message: "Product fetched successfully",
       data: product,
     });
@@ -427,7 +427,7 @@ const updateProduct = async (req, res, next) => {
 
     const [rows] = await connection.query("SELECT * FROM products WHERE id = ?", [id]);
     if (!rows.length) {
-      return res.status(404).json({ message: "Product not found" });
+      return sendError(res, 404, "PRODUCT_NOT_FOUND", "Product not found");
     }
 
     await connection.beginTransaction();
@@ -439,7 +439,7 @@ const updateProduct = async (req, res, next) => {
     stock = stock !== undefined ? parseInt(stock, 10) : rows[0].stock;
 
     if (old_price !== null && old_price <= price) {
-      return res.status(400).json({ message: "Original price must be higher than current price" });
+      return sendError(res, 400, "PRODUCT_OLD_PRICE_INVALID", "Original price must be higher than current price");
     }
 
     is_active = is_active !== undefined ? is_active : rows[0].is_active;
@@ -479,7 +479,7 @@ const updateProduct = async (req, res, next) => {
     }
 
     await connection.commit();
-    res.status(200).json({ status: true, message: "Product updated successfully" });
+    sendSuccess(res, 200, { status: true, message: "Product updated successfully" });
   } catch (error) {
     await connection.rollback();
     next(error);
@@ -494,7 +494,7 @@ const deleteProduct = async (req, res, next) => {
     const id = req.params.id;
     const [rows] = await connection.query("SELECT * FROM products WHERE id = ?", [id]);
     if (!rows.length) {
-      return res.status(404).json({ message: "Product not found" });
+      return sendError(res, 404, "PRODUCT_NOT_FOUND", "Product not found");
     }
 
     await connection.beginTransaction();
@@ -502,7 +502,7 @@ const deleteProduct = async (req, res, next) => {
     await connection.query("DELETE FROM products WHERE id = ?", [id]);
     await connection.commit();
 
-    res.status(200).json({
+    sendSuccess(res, 200, {
       status: true,
       message: "Product and its images deleted successfully",
     });

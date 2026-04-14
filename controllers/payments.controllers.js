@@ -1,4 +1,5 @@
 import db from "../config/db.js";
+import { sendError, sendSuccess } from "../utils/apiError.js";
 
 // ── GET /api/payments/admin/pending (Admin/Owner) ───────────────────
 export const getPendingPayments = async (req, res, next) => {
@@ -51,9 +52,7 @@ export const uploadProof = async (req, res, next) => {
     const screenshotUrl = req.file?.path;
 
     if (!order_id || !amount || !screenshotUrl) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Missing required fields" });
+      return sendError(res, 400, "VALIDATION_REQUIRED", "Missing required fields");
     }
 
     // Verify order belongs to user and is unpaid
@@ -63,10 +62,7 @@ export const uploadProof = async (req, res, next) => {
     );
 
     if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: "Order not found or already verified",
-      });
+      return sendError(res, 404, "PAYMENT_ORDER_NOT_FOUND", "Order not found or already verified");
     }
 
     await db.query(
@@ -74,9 +70,7 @@ export const uploadProof = async (req, res, next) => {
       [screenshotUrl, reference || null, order_id],
     );
 
-    res
-      .status(200)
-      .json({ success: true, message: "Payment proof uploaded successfully" });
+    sendSuccess(res, 200, { message: "Payment proof uploaded successfully" });
   } catch (error) {
     next(error);
   }
@@ -91,9 +85,7 @@ export const verifyPayment = async (req, res, next) => {
 
     if (!["paid", "rejected"].includes(status)) {
       await connection.release();
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid status" });
+      return sendError(res, 400, "PAYMENT_STATUS_INVALID", "Invalid status", { field: "status" });
     }
 
     // Start transaction to safely deduplicate stock if paid
@@ -135,8 +127,7 @@ export const verifyPayment = async (req, res, next) => {
     }
 
     await connection.commit();
-    res.status(200).json({
-      success: true,
+    sendSuccess(res, 200, {
       message: `Payment successfully marked as ${status}`,
     });
   } catch (error) {

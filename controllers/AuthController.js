@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { registerSchema, loginSchema } from "../validators/user.schema.js";
 import validator from "validator";
+import { sendError, sendSuccess } from "../utils/apiError.js";
 
 // ── Cookie Options ────────────────────────────────────────────────
 const cookieOptions = {
@@ -17,10 +18,18 @@ export const registerUser = async (req, res, next) => {
   try {
     const validation = registerSchema.safeParse(req.body || {});
     if (!validation.success) {
-      return res.status(400).json({
-        success: false,
-        message: validation.error.issues[0].message,
-      });
+      const issue = validation.error.issues[0];
+      const message = issue.message;
+      let code = "VALIDATION_REQUIRED";
+      let field = issue.path?.[0] || null;
+
+      if (message.toLowerCase().includes("email")) code = "VALIDATION_INVALID_EMAIL";
+      else if (message.toLowerCase().includes("mobile")) code = "VALIDATION_INVALID_PHONE_EG";
+      else if (message.toLowerCase().includes("uppercase")) code = "AUTH_PASSWORD_UPPERCASE_REQUIRED";
+      else if (message.toLowerCase().includes("number")) code = "AUTH_PASSWORD_NUMBER_REQUIRED";
+      else if (message.toLowerCase().includes("8 characters")) code = "AUTH_PASSWORD_TOO_SHORT";
+
+      return sendError(res, 400, code, message, { field });
     }
 
     let { name, email, password, phone } = validation.data;
@@ -32,13 +41,13 @@ export const registerUser = async (req, res, next) => {
     // Check for duplicate email
     const [emailRows] = await db.query("SELECT id FROM users WHERE email = ?", [email]);
     if (emailRows.length > 0) {
-      return res.status(400).json({ success: false, message: "Email already exists" });
+      return sendError(res, 400, "AUTH_EMAIL_EXISTS", "Email already exists", { field: "email" });
     }
 
     // Check for duplicate phone
     const [phoneRows] = await db.query("SELECT id FROM users WHERE phone = ?", [phone]);
     if (phoneRows.length > 0) {
-      return res.status(400).json({ success: false, message: "Phone number already exists" });
+      return sendError(res, 400, "AUTH_PHONE_EXISTS", "Phone number already exists", { field: "phone" });
     }
 
     const hashedPassword = await bcrypt.hash(password, 12); // Increased salt rounds for security
@@ -52,10 +61,10 @@ export const registerUser = async (req, res, next) => {
     );
 
     if (result.affectedRows === 0) {
-      return res.status(500).json({ success: false, message: "Registration failed" });
+      return sendError(res, 500, "AUTH_REGISTER_FAILED", "Registration failed");
     }
 
-    return res.status(201).json({ success: true, message: "User registered successfully" });
+    return sendSuccess(res, 201, { message: "User registered successfully" });
   } catch (error) {
     next(error);
   }
@@ -66,10 +75,12 @@ export const loginUser = async (req, res, next) => {
   try {
     const validation = loginSchema.safeParse(req.body || {});
     if (!validation.success) {
-      return res.status(400).json({
-        success: false,
-        message: validation.error.issues[0].message,
-      });
+      const issue = validation.error.issues[0];
+      const message = issue.message;
+      let code = "VALIDATION_REQUIRED";
+      let field = issue.path?.[0] || null;
+      if (message.toLowerCase().includes("email")) code = "VALIDATION_INVALID_EMAIL";
+      return sendError(res, 400, code, message, { field });
     }
 
     const { email, password } = validation.data;
@@ -77,13 +88,13 @@ export const loginUser = async (req, res, next) => {
 
     const [rows] = await db.query("SELECT * FROM users WHERE email = ?", [sanitizedEmail]);
     if (rows.length === 0) {
-      return res.status(401).json({ success: false, message: "Invalid credentials" });
+      return sendError(res, 401, "AUTH_INVALID_CREDENTIALS", "Invalid credentials");
     }
 
     const user = rows[0];
     const isPasswordValid = await bcrypt.compare(password, user.password_hash);
     if (!isPasswordValid) {
-      return res.status(401).json({ success: false, message: "Invalid credentials" });
+      return sendError(res, 401, "AUTH_INVALID_CREDENTIALS", "Invalid credentials");
     }
 
     const publicUser = {
@@ -102,11 +113,9 @@ export const loginUser = async (req, res, next) => {
     // Set JWT as HttpOnly cookie
     res.cookie("token", token, cookieOptions);
 
-    return res.status(200).json({
-      success: true,
+    return sendSuccess(res, 200, {
       message: "Login successful",
       user: publicUser,
-      // Token is now strictly in HttpOnly cookie
     });
   } catch (error) {
     next(error);
@@ -116,5 +125,5 @@ export const loginUser = async (req, res, next) => {
 // ── logoutUser ─────────────────────────────────────────────────────
 export const logoutUser = (req, res) => {
   res.cookie("token", "", { ...cookieOptions, maxAge: 0, expires: new Date(0) });
-  return res.status(200).json({ success: true, message: "Logged out successfully" });
+  return sendSuccess(res, 200, { message: "Logged out successfully" });
 };

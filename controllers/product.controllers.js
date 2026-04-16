@@ -161,6 +161,7 @@ async function enrichProducts(rows, connection = db) {
 }
 
 const createProduct = async (req, res, next) => {
+  const connection = await db.getConnection();
   try {
     let {
       name,
@@ -168,80 +169,153 @@ const createProduct = async (req, res, next) => {
       category_id,
       price,
       old_price,
+      net_profit,
       description,
       description_ar,
       specs_en,
       specs_ar,
       stock,
       is_active,
+      size_mode,
+      size_options,
+      colors,
+      variant_stock,
     } = req.body || {};
 
-    if (!name || !category_id || !price || !description || !stock) {
-      return sendError(res, 400, "VALIDATION_REQUIRED", "All fields are required");
+    // ── Required field validation ─────────────────────────────────────
+    if (!name || !category_id || !price || !description) {
+      return sendError(res, 400, "VALIDATION_REQUIRED", "Name, category, price, and description are required");
     }
 
-    is_active = is_active !== undefined ? is_active : true;
+    // ── Parse numbers ─────────────────────────────────────────────────
     price = parseFloat(price);
     old_price = old_price ? parseFloat(old_price) : null;
-    stock = parseInt(stock, 10);
+    net_profit = net_profit !== undefined && net_profit !== "" ? parseFloat(net_profit) : null;
+    stock = parseInt(stock, 10) || 0;
+    is_active = is_active !== undefined ? Number(is_active) : 1;
+    size_mode = size_mode || "none";
 
-    if (Number.isNaN(price) || Number.isNaN(stock)) {
-      return sendError(res, 400, "PRODUCT_INVALID_NUMBERS", "Price and stock must be numbers");
+    if (Number.isNaN(price)) {
+      return sendError(res, 400, "PRODUCT_INVALID_NUMBERS", "Price must be a valid number");
     }
-
     if (old_price !== null && old_price <= price) {
       return sendError(res, 400, "PRODUCT_OLD_PRICE_INVALID", "Original price must be higher than current price");
     }
 
+    // ── Parse JSON arrays from FormData ───────────────────────────────
+    const parsedColors   = parseJsonArray(colors);   // [{id,client_key,name,value,sort_order}]
+    const parsedVariants = parseJsonArray(variant_stock); // [{color_key,size_value,stock}]
+    const parsedSizes    = parseJsonArray(size_options);
+
+    // ── Image files by fieldname ───────────────────────────────────────
+    const allFiles = req.files || [];
+    const generalImages = allFiles.filter((f) => f.fieldname === "images");
+
+    // Color images are keyed as "color_images:<client_key>"
+    const colorImageMap = {};
+    allFiles
+      .filter((f) => f.fieldname.startsWith("color_images:"))
+      .forEach((f) => {
+        const key = f.fieldname.replace("color_images:", "");
+        if (!colorImageMap[key]) colorImageMap[key] = [];
+        colorImageMap[key].push(f);
+      });
+
+    // ── Image requirement: need general images OR at least one color image ─
+    const hasColorImages = Object.values(colorImageMap).some((arr) => arr.length > 0);
+    if (!generalImages.length && !hasColorImages) {
+      return sendError(res, 400, "UPLOAD_IMAGE_REQUIRED", "At least one product image is required", { field: "images" });
+    }
+
+    // ── Duplicate name check ──────────────────────────────────────────
     const slug = slugify(name, { lower: true, strict: true });
-    const [rows] = await db.query("SELECT * FROM products WHERE name = ?", [name]);
-    if (rows.length > 0) {
-      return sendError(res, 400, "PRODUCT_EXISTS", "Product already exists");
+    const [existing] = await db.query("SELECT id FROM products WHERE name = ?", [name]);
+    if (existing.length > 0) {
+      return sendError(res, 400, "PRODUCT_EXISTS", "A product with this name already exists");
     }
 
-    const [result] = await db.query(
-      "INSERT INTO products (name, name_ar, category_id, price, old_price, slug, description, description_ar, specs_en, specs_ar, stock, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [
-        name,
-        name_ar || null,
-        category_id,
-        price,
-        old_price,
-        slug,
-        description,
-        description_ar || null,
-        specs_en || null,
-        specs_ar || null,
-        stock,
-        is_active,
-      ],
-    );
+    // ── Check DB schema for net_profit column ─────────────────────────
+    const [columns] = await db.query("SHOW COLUMNS FROM products LIKE 'net_profit'");
+    const hasNetProfit = columns.length > 0;
 
+    await connection.beginTransaction();
+
+    // ── Insert product ────────────────────────────────────────────────
+    let insertSql, insertParams;
+    if (hasNetProfit) {
+      insertSql = "INSERT INTO products (name, name_ar, category_id, price, old_price, net_profit, slug, description, description_ar, specs_en, specs_ar, stock, is_active, size_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+      insertParams = [name, name_ar || null, category_id, price, old_price, net_profit, slug, description, description_ar || null, specs_en || null, specs_ar || null, stock, is_active, size_mode];
+    } else {
+      insertSql = "INSERT INTO products (name, name_ar, category_id, price, old_price, slug, description, description_ar, specs_en, specs_ar, stock, is_active, size_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+      insertParams = [name, name_ar || null, category_id, price, old_price, slug, description, description_ar || null, specs_en || null, specs_ar || null, stock, is_active, size_mode];
+    }
+
+    const [result] = await connection.query(insertSql, insertParams);
     if (result.affectedRows === 0) {
-      return sendError(res, 400, "PRODUCT_CREATE_FAILED", "Product not created");
+      await connection.rollback();
+      return sendError(res, 500, "PRODUCT_CREATE_FAILED", "Product could not be created");
     }
 
-    const productId = result.insertId;
-    const imageFiles = (req.files || []).filter((file) => file.fieldname === "images");
-    if (!imageFiles.length) {
-      return sendError(res, 400, "UPLOAD_IMAGE_REQUIRED", "Image is required", { field: "images" });
+    const productId = Number(result.insertId);
+
+    // ── Save size_options ─────────────────────────────────────────────
+    if (parsedSizes.length) {
+      await connection.query(
+        "UPDATE products SET size_options = ? WHERE id = ?",
+        [JSON.stringify(parsedSizes), productId],
+      );
     }
 
-    await Promise.all(
-      imageFiles.map((file, index) =>
-        db.query("INSERT INTO product_images (product_id, image_url, is_main) VALUES (?, ?, ?)", [
-          productId,
-          file.path,
-          index === 0 ? 1 : 0,
-        ]),
-      ),
-    );
+    // ── Save general images ───────────────────────────────────────────
+    if (generalImages.length) {
+      await Promise.all(
+        generalImages.map((file, i) =>
+          connection.query(
+            "INSERT INTO product_images (product_id, image_url, is_main) VALUES (?, ?, ?)",
+            [productId, file.path, i === 0 ? 1 : 0],
+          ),
+        ),
+      );
+    }
 
-    sendSuccess(res, 201, { message: "Product created successfully" });
+    // ── Save colors + color images ────────────────────────────────────
+    const clientKeyToColorId = {};
+    for (const color of parsedColors) {
+      const [colorResult] = await connection.query(
+        "INSERT INTO product_colors (product_id, color_key, name, name_ar, value, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+        [productId, color.value?.toLowerCase().replace(/\s+/g, "_") || color.client_key, color.name, color.name_ar || null, color.value, color.sort_order ?? 0],
+      );
+      const colorId = Number(colorResult.insertId);
+      clientKeyToColorId[color.client_key] = colorId;
+
+      const colorFiles = colorImageMap[color.client_key] || [];
+      for (let i = 0; i < colorFiles.length; i++) {
+        await connection.query(
+          "INSERT INTO product_color_images (color_id, image_url, is_main, sort_order) VALUES (?, ?, ?, ?)",
+          [colorId, colorFiles[i].path, i === 0 ? 1 : 0, i],
+        );
+      }
+    }
+
+    // ── Save variants (color × size combinations) ─────────────────────
+    for (const variant of parsedVariants) {
+      const colorId = variant.color_key ? clientKeyToColorId[variant.color_key] ?? null : null;
+      await connection.query(
+        "INSERT INTO product_variants (product_id, color_id, size_value, stock) VALUES (?, ?, ?, ?)",
+        [productId, colorId, variant.size_value || null, Number(variant.stock || 0)],
+      );
+    }
+
+    await connection.commit();
+    sendSuccess(res, 201, { message: "Product created successfully", data: { id: productId } });
   } catch (error) {
+    await connection.rollback();
     next(error);
+  } finally {
+    connection.release();
   }
 };
+
 
 const getAllProducts = async (req, res, next) => {
   try {
@@ -417,12 +491,18 @@ const updateProduct = async (req, res, next) => {
       category_id,
       price,
       old_price,
+      net_profit,
       description,
       description_ar,
       specs_en,
       specs_ar,
       stock,
       is_active,
+      size_mode,
+      size_options,
+      colors,
+      variant_stock,
+      existing_images,
     } = req.body || {};
 
     const [rows] = await connection.query("SELECT * FROM products WHERE id = ?", [id]);
@@ -430,51 +510,129 @@ const updateProduct = async (req, res, next) => {
       return sendError(res, 404, "PRODUCT_NOT_FOUND", "Product not found");
     }
 
-    await connection.beginTransaction();
-
+    // ── Parse numbers ─────────────────────────────────────────────────
     name = name || rows[0].name;
-    name_ar = name_ar || rows[0].name_ar;
+    category_id = category_id || rows[0].category_id;
+    description = description || rows[0].description;
     price = price !== undefined ? parseFloat(price) : rows[0].price;
     old_price = old_price !== undefined ? (old_price ? parseFloat(old_price) : null) : rows[0].old_price;
+    net_profit = net_profit !== undefined && net_profit !== "" ? parseFloat(net_profit) : rows[0].net_profit;
     stock = stock !== undefined ? parseInt(stock, 10) : rows[0].stock;
+    is_active = is_active !== undefined ? Number(is_active) : rows[0].is_active;
+    size_mode = size_mode || rows[0].size_mode || "none";
 
+    if (Number.isNaN(price)) {
+      return sendError(res, 400, "PRODUCT_INVALID_NUMBERS", "Price must be a valid number");
+    }
     if (old_price !== null && old_price <= price) {
       return sendError(res, 400, "PRODUCT_OLD_PRICE_INVALID", "Original price must be higher than current price");
     }
 
-    is_active = is_active !== undefined ? is_active : rows[0].is_active;
-    category_id = category_id || rows[0].category_id;
+    // ── Parse JSON arrays from FormData ───────────────────────────────
+    const parsedColors     = parseJsonArray(colors);       // [{id,client_key,name,value,sort_order,existingImages}]
+    const parsedVariants   = parseJsonArray(variant_stock); // [{color_key,size_value,stock}]
+    const parsedSizes      = parseJsonArray(size_options);
+    const parsedExtImages  = parseJsonArray(existing_images);
+
+    // ── Image files by fieldname ───────────────────────────────────────
+    const allFiles = req.files || [];
+    const newGeneralImages = allFiles.filter((f) => f.fieldname === "images");
+
+    const newColorImageMap = {};
+    allFiles
+      .filter((f) => f.fieldname.startsWith("color_images:"))
+      .forEach((f) => {
+        const key = f.fieldname.replace("color_images:", "");
+        if (!newColorImageMap[key]) newColorImageMap[key] = [];
+        newColorImageMap[key].push(f);
+      });
+
+    // ── Image validation ──────────────────────────────────────────────
+    const hasAnyColorImage = parsedColors.some(c => (c.existingImages && c.existingImages.length > 0) || (newColorImageMap[c.client_key] && newColorImageMap[c.client_key].length > 0));
+    const hasAnyGeneralImage = parsedExtImages.length > 0 || newGeneralImages.length > 0;
+    
+    if (!hasAnyGeneralImage && !hasAnyColorImage) {
+      return sendError(res, 400, "UPLOAD_IMAGE_REQUIRED", "At least one product image is required in total", { field: "images" });
+    }
+
+    // ── Check DB schema for net_profit column ─────────────────────────
+    const [columns] = await connection.query("SHOW COLUMNS FROM products LIKE 'net_profit'");
+    const hasNetProfit = columns.length > 0;
+
+    await connection.beginTransaction();
+
     const slug = name ? slugify(name, { lower: true, strict: true }) : rows[0].slug;
 
-    await connection.query(
-      "UPDATE products SET name = ?, name_ar = ?, slug = ?, category_id = ?, price = ?, old_price = ?, description = ?, description_ar = ?, specs_en = ?, specs_ar = ?, stock = ?, is_active = ? WHERE id = ?",
-      [
-        name,
-        name_ar,
-        slug,
-        category_id,
-        price,
-        old_price,
-        description || rows[0].description,
-        description_ar !== undefined ? description_ar : rows[0].description_ar,
-        specs_en !== undefined ? specs_en : rows[0].specs_en,
-        specs_ar !== undefined ? specs_ar : rows[0].specs_ar,
-        stock,
-        is_active,
-        id,
-      ],
-    );
+    // ── Update product ────────────────────────────────────────────────
+    let updateSql, updateParams;
+    if (hasNetProfit) {
+      updateSql = "UPDATE products SET name = ?, name_ar = ?, slug = ?, category_id = ?, price = ?, old_price = ?, net_profit = ?, description = ?, description_ar = ?, specs_en = ?, specs_ar = ?, stock = ?, is_active = ?, size_mode = ?, size_options = ? WHERE id = ?";
+      updateParams = [name, name_ar, slug, category_id, price, old_price, net_profit, description, description_ar !== undefined ? description_ar : rows[0].description_ar, specs_en !== undefined ? specs_en : rows[0].specs_en, specs_ar !== undefined ? specs_ar : rows[0].specs_ar, stock, is_active, size_mode, JSON.stringify(parsedSizes), id];
+    } else {
+      updateSql = "UPDATE products SET name = ?, name_ar = ?, slug = ?, category_id = ?, price = ?, old_price = ?, description = ?, description_ar = ?, specs_en = ?, specs_ar = ?, stock = ?, is_active = ?, size_mode = ?, size_options = ? WHERE id = ?";
+      updateParams = [name, name_ar, slug, category_id, price, old_price, description, description_ar !== undefined ? description_ar : rows[0].description_ar, specs_en !== undefined ? specs_en : rows[0].specs_en, specs_ar !== undefined ? specs_ar : rows[0].specs_ar, stock, is_active, size_mode, JSON.stringify(parsedSizes), id];
+    }
 
-    const imageFiles = (req.files || []).filter((file) => file.fieldname === "images");
-    if (imageFiles.length) {
-      await connection.query("DELETE FROM product_images WHERE product_id = ?", [id]);
-      await Promise.all(
-        imageFiles.map((file, index) =>
-          connection.query(
-            "INSERT INTO product_images (product_id, image_url, is_main) VALUES (?, ?, ?)",
-            [id, file.path, index === 0 ? 1 : 0],
-          ),
-        ),
+    await connection.query(updateSql, updateParams);
+
+    // ── Rebuild general images ────────────────────────────────────────
+    await connection.query("DELETE FROM product_images WHERE product_id = ?", [id]);
+    
+    let isMainAssigned = false;
+    for (let i = 0; i < parsedExtImages.length; i++) {
+        await connection.query(
+          "INSERT INTO product_images (product_id, image_url, is_main) VALUES (?, ?, ?)",
+          [id, parsedExtImages[i], !isMainAssigned ? 1 : 0],
+        );
+        isMainAssigned = true;
+    }
+    for (let i = 0; i < newGeneralImages.length; i++) {
+        await connection.query(
+          "INSERT INTO product_images (product_id, image_url, is_main) VALUES (?, ?, ?)",
+          [id, newGeneralImages[i].path, !isMainAssigned ? 1 : 0],
+        );
+        isMainAssigned = true;
+    }
+
+    // ── Rebuild colors + color images ─────────────────────────────────
+    await connection.query("DELETE FROM product_colors WHERE product_id = ?", [id]);
+    const clientKeyToColorId = {};
+    for (const color of parsedColors) {
+      const [colorResult] = await connection.query(
+        "INSERT INTO product_colors (product_id, color_key, name, name_ar, value, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+        [id, color.value?.toLowerCase().replace(/\s+/g, "_") || color.client_key, color.name, color.name_ar || null, color.value, color.sort_order ?? 0],
+      );
+      const colorId = Number(colorResult.insertId);
+      clientKeyToColorId[color.client_key] = colorId;
+
+      let isMainColorImgAssigned = false;
+      const existColorImgs = color.existingImages || [];
+      const newColorImgs = newColorImageMap[color.client_key] || [];
+      
+      let sortOrder = 0;
+      for (const url of existColorImgs) {
+        await connection.query(
+          "INSERT INTO product_color_images (color_id, image_url, is_main, sort_order) VALUES (?, ?, ?, ?)",
+          [colorId, url, !isMainColorImgAssigned ? 1 : 0, sortOrder++],
+        );
+        isMainColorImgAssigned = true;
+      }
+      for (const file of newColorImgs) {
+        await connection.query(
+          "INSERT INTO product_color_images (color_id, image_url, is_main, sort_order) VALUES (?, ?, ?, ?)",
+          [colorId, file.path, !isMainColorImgAssigned ? 1 : 0, sortOrder++],
+        );
+        isMainColorImgAssigned = true;
+      }
+    }
+
+    // ── Rebuild variants (color × size combinations) ──────────────────
+    await connection.query("DELETE FROM product_variants WHERE product_id = ?", [id]);
+    for (const variant of parsedVariants) {
+      const colorId = variant.color_key ? clientKeyToColorId[variant.color_key] ?? null : null;
+      await connection.query(
+        "INSERT INTO product_variants (product_id, color_id, size_value, stock) VALUES (?, ?, ?, ?)",
+        [id, colorId, variant.size_value || null, Number(variant.stock || 0)],
       );
     }
 

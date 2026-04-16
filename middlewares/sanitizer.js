@@ -6,7 +6,8 @@ import validator from "validator";
  */
 export const sanitizeData = (req, res, next) => {
   try {
-    const whitelist = [
+    // Fields in this list are skipped from HTML escaping (still trimmed if strings).
+    const escapeWhitelist = [
       "header_scripts",
       "footer_scripts",
       "description",
@@ -17,14 +18,31 @@ export const sanitizeData = (req, res, next) => {
       "google_ads_client_id"
     ];
 
+    // Fields that should only be trimmed — NOT HTML-escaped (e.g. emails, URLs, image paths)
+    const trimOnlyFields = [
+      "email",
+      "existingImage",
+      "image",
+      "logo",
+      "favicon",
+      "redirect_url",
+      "url",
+      "website",
+    ];
+
     const sanitize = (data, key = null) => {
-      // 1. Skip if key is in whitelist
-      if (key && whitelist.includes(key)) {
+      // 1. Skip entirely if key is in the full-escape whitelist (raw HTML allowed)
+      if (key && escapeWhitelist.includes(key)) {
         return data;
       }
 
-      // 2. Strings: Trim and Escape
+      // 2. Strings
       if (typeof data === "string") {
+        // Trim-only fields (emails, URLs, image paths) — do NOT HTML-escape
+        if (key && trimOnlyFields.includes(key)) {
+          return data.trim();
+        }
+        // Everything else: trim + HTML-escape to prevent XSS
         return validator.escape(data.trim());
       }
 

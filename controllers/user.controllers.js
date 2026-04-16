@@ -91,10 +91,30 @@ const updateUser = async (req, res, next) => {
     // Accept both "name" and "username" from frontend for compatibility
     const { name, username, email, phone, password, role } = req.body || {};
     const finalName = name || username || currentUser.name;
-    const finalEmail = email || currentUser.email;
     const finalPhone = phone || currentUser.phone;
 
-    // ── Role protection ──────────────────────────────────────────
+    // ── Email: use simple lowercase to match how emails are stored ──────
+    // Avoid validator.normalizeEmail() here — it converts gmail.com ↔
+    // googlemail.com which causes false duplicate-key conflicts if the stored
+    // email uses a different domain alias than the incoming one.
+    let finalEmail = currentUser.email; // default: keep current
+    if (email && email.trim()) {
+      finalEmail = email.trim().toLowerCase();
+    }
+
+    // ── Email conflict: block if another user owns this address ──────────
+    const [conflict] = await db.query(
+      "SELECT id FROM users WHERE email = ? AND id != ?",
+      [finalEmail, id],
+    );
+    if (conflict.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: "This email address is already used by another account",
+      });
+    }
+
+    // ── Role protection ──────────────────────────────────────────────────
     let finalRole = currentUser.role; // default: keep existing role
     if (role && role !== currentUser.role) {
       const requesterRole = req.user?.role;
@@ -105,8 +125,6 @@ const updateUser = async (req, res, next) => {
         // Admin can change role only if not escalating to owner
         finalRole = role;
       } else {
-        // Regular user or admin trying to set owner — silently ignore role change
-        // (return error so it's visible to the caller)
         return res.status(403).json({
           success: false,
           message: "You do not have permission to change user roles",
@@ -114,7 +132,7 @@ const updateUser = async (req, res, next) => {
       }
     }
 
-    // ── Password handling ────────────────────────────────────────
+    // ── Password handling ────────────────────────────────────────────────
     let finalPasswordHash = currentUser.password_hash;
     if (password) {
       if (password.length < 8) {
@@ -127,21 +145,15 @@ const updateUser = async (req, res, next) => {
       finalPasswordHash = await bcrypt.hash(password, 10);
     }
 
-    // ── Image handling ───────────────────────────────────────────
-    const finalImage = req.file?.path || currentUser.image;
+    // ── Image handling ───────────────────────────────────────────────────
+    // Priority: new uploaded file → existingImage sent by frontend → DB value
+    const finalImage =
+      req.file?.path || req.body?.existingImage || currentUser.image;
 
-    // ── Perform update ───────────────────────────────────────────
+    // ── Perform update ───────────────────────────────────────────────────
     const [result] = await db.query(
       "UPDATE users SET name = ?, email = ?, phone = ?, role = ?, password_hash = ?, image = ? WHERE id = ?",
-      [
-        finalName,
-        finalEmail,
-        finalPhone,
-        finalRole,
-        finalPasswordHash,
-        finalImage,
-        id,
-      ],
+      [finalName, finalEmail, finalPhone, finalRole, finalPasswordHash, finalImage, id],
     );
 
     if (result.affectedRows === 0) {

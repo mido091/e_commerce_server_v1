@@ -24,11 +24,11 @@ const storage = new CloudinaryStorage({
   },
 });
 
-import { fileTypeFromBuffer } from "file-type";
-
-const fileFilter = async (req, file, cb) => {
+// Synchronous fileFilter — multer does NOT support async fileFilter callbacks.
+// Using async causes unhandled promise rejections and 500 errors.
+const fileFilter = (req, file, cb) => {
   const allowedMimeTypes = ["image/jpeg", "image/png", "image/webp"];
-  
+
   if (!allowedMimeTypes.includes(file.mimetype)) {
     const error = new Error("Invalid file type. Only JPEG, PNG, and WEBP images are allowed.");
     error.status = 400;
@@ -37,10 +37,6 @@ const fileFilter = async (req, file, cb) => {
 
   cb(null, true);
 };
-
-// We will add a post-upload middleware for buffer validation since Multer's fileFilter 
-// only has access to the stream metadata, not the full buffer if using Cloudinary directly.
-// However, we can use a separate middleware after upload to verify.
 
 // Multer configuration
 const upload = multer({

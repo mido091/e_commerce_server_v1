@@ -31,11 +31,21 @@ router.post("/logout", logoutUser);
 router.get("/:id", verifyToken, verifySelfOrAdmin, getUserById);
 
 // PATCH /users/:id — user can update their own profile; admins can update any
+const handleUpload = (req, res, next) => {
+  upload.single("image")(req, res, (err) => {
+    if (err) {
+      console.error("[Multer] Upload error:", err.message);
+      return next(err);
+    }
+    next();
+  });
+};
+
 router.patch(
   "/:id",
   verifyToken,
   verifySelfOrAdmin,
-  upload.single("image"),
+  handleUpload,
   updateUser,
 );
 
@@ -44,7 +54,7 @@ router.put(
   "/:id",
   verifyToken,
   verifySelfOrAdmin,
-  upload.single("image"),
+  handleUpload,
   updateUser,
 );
 

@@ -656,8 +656,18 @@ const deleteProduct = async (req, res, next) => {
     }
 
     await connection.beginTransaction();
+
+    // Delete all child rows first to avoid Foreign Key constraint errors
+    await connection.query("DELETE FROM product_variants WHERE product_id = ?", [id]);
+    // Delete color images before deleting colors
+    await connection.query(
+      "DELETE pci FROM product_color_images pci INNER JOIN product_colors pc ON pci.color_id = pc.id WHERE pc.product_id = ?",
+      [id],
+    );
+    await connection.query("DELETE FROM product_colors WHERE product_id = ?", [id]);
     await connection.query("DELETE FROM product_images WHERE product_id = ?", [id]);
     await connection.query("DELETE FROM products WHERE id = ?", [id]);
+
     await connection.commit();
 
     sendSuccess(res, 200, {
